@@ -41,21 +41,18 @@ void main(uint3 id : SV_DispatchThreadID)
     const float4 info = aux[mp];
     const float depth = info.z;
 
-    float2 mv = game_mv;
-    if (mode < 0.5)
-    {
-        const float cam_px = length(info.xy * out_size);
-        const float own_px = length((game_mv - info.xy) * out_size);
-        const float ratio = own_px / max(cam_px, 1.0);
-        mv = info.xy * (1.0 - smoothstep(0.2, 0.6, ratio));
-    }
+    // FORCE MODE 0 LOGIC (Camera Motion Only)
+    const float cam_px = length(info.xy * out_size);
+    const float own_px = length((game_mv - info.xy) * out_size);
+    const float ratio = own_px / max(cam_px, 1.0);
+    float2 mv = info.xy * (1.0 - smoothstep(0.2, 0.6, ratio));
 
-    // MULTIPLIED: Added a 4.0x multiplier to the shutter speed to drastically lengthen the blur
-    float2 streak = mv * (shutter * 4.0) * out_size; 
+    // HARDCODE SHUTTER: 1.5 is a massive shutter value (originally around 0.5)
+    float2 streak = mv * 1.5 * out_size; 
     float length_px = length(streak);
     
-    // CAP RAISED: Multiplied the hard limit by 4.0 so the streak isn't prematurely clamped by the C++ UI limits
-    const float limit = (max_length * 4.0) * float(height);
+    // HARDCODE LIMIT: Allow streaks to cross up to 15% of the entire screen height
+    const float limit = 0.15 * float(height);
     if (length_px > limit)
     {
         streak *= limit / length_px;
