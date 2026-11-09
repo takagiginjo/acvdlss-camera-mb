@@ -26,7 +26,7 @@ jobs:
           if (-not (Test-Path "deps/reshade/examples/utils/descriptor_tracking.cpp")) {
             git clone --depth 1 https://github.com/crosire/reshade.git deps/reshade
           }
-
+          
          # 2. Clone ImGui (v1.92.5 matches the newer ReShade ABI)
           if (-not (Test-Path "deps/imgui/imgui.h")) {
             git clone --depth 1 --branch v1.92.5 https://github.com/ocornut/imgui.git deps/imgui
