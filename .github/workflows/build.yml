@@ -27,12 +27,10 @@ jobs:
             git clone --depth 1 https://github.com/crosire/reshade.git deps/reshade
           }
 
-          # 2. Clone ImGui (v1.89.7 matches ReShade's ABI)
+         # 2. Clone ImGui (v1.92.5 matches the newer ReShade ABI)
           if (-not (Test-Path "deps/imgui/imgui.h")) {
-            git clone --depth 1 --branch v1.89.7 https://github.com/ocornut/imgui.git deps/imgui
+            git clone --depth 1 --branch v1.92.5 https://github.com/ocornut/imgui.git deps/imgui
           }
-          # Also copy ImGui headers into ReShade's include directory in case CMake only includes deps/reshade/include
-          Copy-Item "deps/imgui/*.h" -Destination "deps/reshade/include/" -Force
 
           # 3. Clone NVIDIA DLSS SDK (for nvsdk_ngx.h and nvsdk_ngx_s.lib)
           if (-not (Test-Path "deps/dlss_temp")) {
