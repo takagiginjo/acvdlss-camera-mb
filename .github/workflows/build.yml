@@ -5,21 +5,76 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Checkout code with submodules
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Configure CMake
-        run: cmake -B build -A x64
+      - name: Fetch Missing Dependencies & Configure
+        shell: pwsh
+        run: |
+          if (Test-Path "acvdlss-main/CMakeLists.txt") { cd acvdlss-main }
+          
+          $cmake = Get-Content CMakeLists.txt -Raw
+          Write-Host "=== CMakeLists.txt ==="
+          Write-Host $cmake
+          Write-Host "======================"
+
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+
+          # 1. Clone ReShade
+          if (-not (Test-Path "deps/reshade/examples/utils/descriptor_tracking.cpp")) {
+            git clone --depth 1 https://github.com/crosire/reshade.git deps/reshade
+          }
+
+          # 2. Clone ImGui (v1.89.7 matches ReShade's ABI)
+          if (-not (Test-Path "deps/imgui/imgui.h")) {
+            git clone --depth 1 --branch v1.89.7 https://github.com/ocornut/imgui.git deps/imgui
+          }
+          # Also copy ImGui headers into ReShade's include directory in case CMake only includes deps/reshade/include
+          Copy-Item "deps/imgui/*.h" -Destination "deps/reshade/include/" -Force
+
+          # 3. Clone NVIDIA DLSS SDK (for nvsdk_ngx.h and nvsdk_ngx_s.lib)
+          if (-not (Test-Path "deps/dlss_temp")) {
+            git clone --depth 1 https://github.com/NVIDIA/DLSS.git deps/dlss_temp
+          }
+
+          # Populate common DLSS folder structures and any custom deps/ path referenced in CMakeLists.txt
+          $dlssDirs = @("deps/dlss", "deps/DLSS", "deps/ngx", "deps/NGX", "deps/nvsdk_ngx")
+          $regexMatches = [regex]::Matches($cmake, 'deps/[A-Za-z0-9_\-/]+')
+          foreach ($m in $regexMatches) {
+            $sub = ($m.Value -split '/')[1]
+            if ($sub -notin @("reshade", "imgui", "dlss_temp")) {
+              $dlssDirs += "deps/$sub"
+            }
+          }
+
+          foreach ($d in ($dlssDirs | Select-Object -Unique)) {
+            New-Item -ItemType Directory -Force -Path "$d/include" | Out-Null
+            New-Item -ItemType Directory -Force -Path "$d/lib/Windows_x86_64/x64" | Out-Null
+            New-Item -ItemType Directory -Force -Path "$d/lib/x64" | Out-Null
+            Copy-Item "deps/dlss_temp/include/*" -Destination "$d/include/" -Recurse -Force
+            Copy-Item "deps/dlss_temp/include/*" -Destination "$d/" -Recurse -Force
+            Copy-Item "deps/dlss_temp/lib/Windows_x86_64/x64/*" -Destination "$d/lib/Windows_x86_64/x64/" -Recurse -Force
+            Copy-Item "deps/dlss_temp/lib/Windows_x86_64/x64/*" -Destination "$d/lib/x64/" -Recurse -Force
+            Copy-Item "deps/dlss_temp/lib/Windows_x86_64/x64/*" -Destination "$d/lib/" -Recurse -Force
+            Copy-Item "deps/dlss_temp/lib/Windows_x86_64/x64/*" -Destination "$d/" -Recurse -Force
+          }
+          # Also copy NGX headers to deps/reshade/include as a fallback
+          Copy-Item "deps/dlss_temp/include/*" -Destination "deps/reshade/include/" -Recurse -Force
+
+          cmake -B build -A x64
 
       - name: Build Release
-        run: cmake --build build --config Release
+        shell: pwsh
+        run: |
+          if (Test-Path "acvdlss-main/CMakeLists.txt") { cd acvdlss-main }
+          cmake --build build --config Release
 
       - name: Upload Compiled Addon
         uses: actions/upload-artifact@v4
         with:
           name: acvdlss-build
           path: |
-            build/Release/*.addon64
-            build/Release/*.dll
+            **/build/Release/*.addon64
+            **/build/Release/*.dll
