@@ -323,3 +323,167 @@ static void draw_status(const taa_status &s)
             ImGui::TextDisabled("This scene has no motion vectors, so DLSS follows the camera alone.");
         break;
     case taa_state::failed:
+        ImGui::TextColored(WARNING_COLOR, "DLSS stopped: %s.", s.message.c_str());
+        ImGui::TextDisabled("The game's own anti-aliasing is back until the game restarts.");
+        break;
+    }
+}
+
+static const int STATUS_LINES = 3;
+
+static void draw_window(effect_runtime *runtime)
+{
+    const float scale = ImGui::GetFontSize() / 13.0f;
+    ImGui::SetWindowSize(ImVec2(560.0f * scale, 450.0f * scale), ImGuiCond_FirstUseEver);
+
+    const float top = ImGui::GetCursorPosY();
+    const taa_status s = taa_get_status();
+    draw_status(s);
+    draw_lod_bias();
+    if (const std::string warning = dlss_versions_warning(); !warning.empty())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, WARNING_COLOR);
+        ImGui::TextWrapped("%s", warning.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), top + STATUS_LINES * ImGui::GetTextLineHeightWithSpacing()));
+    ImGui::Separator();
+
+    bool enabled = g_settings.enabled;
+    if (ImGui::Checkbox("Enabled", &enabled))
+        set_enabled(enabled, "the checkbox");
+    draw_toggle_key(runtime);
+
+    int preset = int(g_settings.preset);
+    if (ImGui::Combo("Preset", &preset, PRESETS, int(std::size(PRESETS))))
+    {
+        g_settings.preset = uint32_t(preset);
+        save_preset(uint32_t(preset));
+        log_change("preset set to %s", PRESETS[preset]);
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Auto lets DLSS choose the model NVIDIA recommends for your graphics card.");
+
+    int sharpness = int(std::lround(g_settings.sharpness * 100.0f));
+    if (ImGui::SliderInt("Sharpness", &sharpness, 0, 100, "%d%%"))
+    {
+        g_settings.sharpness = float(sharpness) / 100.0f;
+        reshade::set_config_value(nullptr, SECTION, "Sharpness", sharpness);
+    }
+    static int dragged_from = 0;
+    if (ImGui::IsItemActivated())
+        dragged_from = sharpness;
+    if (ImGui::IsItemDeactivatedAfterEdit() && sharpness != dragged_from)
+        log_change("sharpness set to %d%%", sharpness);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("AMD's RCAS, run on the DLSS output before the HUD is drawn.");
+
+    // --- NEW UI BLOCK: CAMERA MOTION BLUR SLIDERS ---
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Camera Motion Blur");
+    ImGui::Spacing();
+
+    float shutter = g_settings.shutter;
+    if (ImGui::SliderFloat("Shutter Speed", &shutter, 0.0f, 4.0f, "%.2f"))
+    {
+        g_settings.shutter = shutter;
+        reshade::set_config_value(nullptr, SECTION, "Shutter", shutter);
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Fraction of a frame's motion that is blurred. 0.5 = standard 180-degree shutter.");
+
+    float max_length = g_settings.max_length;
+    if (ImGui::SliderFloat("Max Streak Length", &max_length, 0.0f, 0.50f, "%.3f"))
+    {
+        g_settings.max_length = max_length;
+        reshade::set_config_value(nullptr, SECTION, "MaxLength", max_length);
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Longest streak allowed, as a fraction of the screen height.");
+
+    int current_mode = (int)g_settings.mode;
+    if (ImGui::RadioButton("Camera Motion Only", current_mode == 0))
+    {
+        g_settings.mode = 0.0f;
+        reshade::set_config_value(nullptr, SECTION, "MBMode", 0);
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("All Motion", current_mode == 1))
+    {
+        g_settings.mode = 1.0f;
+        reshade::set_config_value(nullptr, SECTION, "MBMode", 1);
+    }
+    // ------------------------------------------------
+}
+
+static void on_overlay(effect_runtime *)
+{
+    if (std::chrono::steady_clock::now() >= g_indicator_until)
+        return;
+
+    const taa_status s = taa_get_status();
+    std::string text;
+    ImVec4 color = WARNING_COLOR;
+    if (!g_settings.enabled)
+    {
+        text = "DLSS: Off";
+        color = ImVec4(0.95f, 0.35f, 0.3f, 1.0f);
+    }
+    else if (s.state == taa_state::running)
+    {
+        text = "DLSS: On (" + describe_mode(s) + ")";
+        color = ImVec4(0.45f, 0.9f, 0.45f, 1.0f);
+    }
+    else if (s.state == taa_state::unavailable || s.state == taa_state::failed)
+    {
+        text = "DLSS: Unavailable, see the ACV DLSS window";
+    }
+    else
+    {
+        text = "DLSS: On, waiting for the game's anti-aliasing";
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 10.0f));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##acvdlss_indicator", nullptr, flags))
+    {
+        ImGui::PushFont(ImGui::GetFont(), ImGui::GetFontSize() * 1.3f);
+        ImGui::TextColored(color, "%s", text.c_str());
+        ImGui::PopFont();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+static void on_init_effect_runtime(effect_runtime *runtime)
+{
+    g_runtime = runtime;
+}
+
+static void on_destroy_effect_runtime(effect_runtime *runtime)
+{
+    if (g_runtime == runtime)
+        g_runtime = nullptr;
+}
+
+static bool on_open_overlay(effect_runtime *, bool open, input_source)
+{
+    g_overlay_open = open;
+    return false;
+}
+
+static void on_present(effect_runtime *runtime)
+{
+    static uint32_t logged_width = 0, logged_height = 0;
+    uint32_t width = 0, height = 0;
+    runtime->get_screenshot_width_and_height(&width, &height);
+    if (width != logged_width || height != logged_height)
+    {
+        logged_width = width;
+        logged_height = height;
+        char text
