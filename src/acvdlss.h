@@ -37,6 +37,11 @@ struct settings
     std::atomic<float> sharpness{0.0f}; // 0..1, 0 skips RCAS
     // Only in ReShade.ini: detailed logging, every frame if need be.
     std::atomic<bool> debug{false};
+
+    // --- Camera Motion Blur settings ---
+    std::atomic<float> shutter{0.5f};
+    std::atomic<float> max_length{0.15f};
+    std::atomic<float> mode{0.0f};
 };
 extern settings g_settings;
 
