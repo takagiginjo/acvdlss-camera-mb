@@ -1,7 +1,7 @@
-# ACV DLSS
+# ACV DLSS + Camera Motion Blur
 
 ReShade add-on that replaces Assassin's Creed Valhalla's own anti-aliasing (TAA)
-with NVIDIA DLSS.
+with NVIDIA DLSS, and trying to implement an equivalent to Puredark's Camera motion blur.
 
 Needs an NVIDIA RTX graphics card.
 
