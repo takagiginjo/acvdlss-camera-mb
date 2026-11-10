@@ -14,7 +14,7 @@ list(REVERSE SDK_BIN)
 find_program(FXC fxc REQUIRED HINTS "$ENV{WindowsSdkVerBinPath}x64" ${SDK_BIN})
 
 set(SHADER_HEADERS)
-foreach(shader prepare rcas downsample)
+foreach(shader prepare rcas downsample motionblur)
     set(header ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.h)
     add_custom_command(
         OUTPUT ${header}
