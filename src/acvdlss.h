@@ -35,13 +35,10 @@ struct settings
     std::atomic<bool> enabled{true};
     std::atomic<uint32_t> preset{0}; // NVIDIA's value: 0 lets DLSS choose, 1..13 are A..M
     std::atomic<float> sharpness{0.0f}; // 0..1, 0 skips RCAS
+    std::atomic<float> blur{0.5f};        // motion blur shutter, 0..1, 0 skips the pass
+    std::atomic<float> blur_limit{0.04f}; // longest blur, as a fraction of the screen height
     // Only in ReShade.ini: detailed logging, every frame if need be.
     std::atomic<bool> debug{false};
-
-    // --- Camera Motion Blur settings ---
-    std::atomic<float> shutter{0.5f};
-    std::atomic<float> max_length{0.15f};
-    std::atomic<float> mode{0.0f};
 };
 extern settings g_settings;
 

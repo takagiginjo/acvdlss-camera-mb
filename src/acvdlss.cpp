@@ -68,6 +68,8 @@ static void save_preset(uint32_t preset)
     reshade::set_config_value(nullptr, SECTION, "Preset", preset == 0 ? "Auto" : letter);
 }
 
+// Saved as the preset's letter, or Auto. Earlier versions saved NVIDIA's
+// number, which is read once and saved back as the letter.
 static uint32_t read_preset()
 {
     char value[16] = "";
@@ -90,28 +92,19 @@ static uint32_t read_preset()
 static void load_settings()
 {
     bool enabled = true, debug = false;
-    int sharpness = 0;
-    float shutter = 0.5f;
-    float max_length = 0.15f;
-    int mode = 0;
-
+    int sharpness = 0, blur = 50, blur_limit = 4;
     reshade::get_config_value(nullptr, SECTION, "Enabled", enabled);
     const uint32_t preset = read_preset();
     reshade::get_config_value(nullptr, SECTION, "Sharpness", sharpness);
+    reshade::get_config_value(nullptr, SECTION, "MotionBlur", blur);
+    reshade::get_config_value(nullptr, SECTION, "MotionBlurLimit", blur_limit);
     reshade::get_config_value(nullptr, SECTION, "Debug", debug);
-    
-    // Load new motion blur settings
-    reshade::get_config_value(nullptr, SECTION, "Shutter", shutter);
-    reshade::get_config_value(nullptr, SECTION, "MaxLength", max_length);
-    reshade::get_config_value(nullptr, SECTION, "MBMode", mode);
-
     g_settings.enabled = enabled;
     g_settings.debug = debug;
     g_settings.preset = preset;
     g_settings.sharpness = float(std::clamp(sharpness, 0, 100)) / 100.0f;
-    g_settings.shutter = shutter;
-    g_settings.max_length = max_length;
-    g_settings.mode = float(mode);
+    g_settings.blur = float(std::clamp(blur, 0, 100)) / 100.0f;
+    g_settings.blur_limit = float(std::clamp(blur_limit, 1, 15)) / 100.0f;
 
     int key = g_toggle_key;
     reshade::get_config_value(nullptr, SECTION, "ToggleKey", key);
@@ -122,10 +115,11 @@ static std::string key_name(uint32_t vk);
 
 static void log_settings()
 {
-    char text[160];
-    snprintf(text, sizeof(text), "settings: %s, preset %s, sharpness %d%%, toggle key %s%s",
+    char text[200];
+    snprintf(text, sizeof(text), "settings: %s, preset %s, sharpness %d%%, motion blur %d%% (limit %d%%), toggle key %s%s",
              g_settings.enabled ? "on" : "off", PRESETS[g_settings.preset],
-             int(std::lround(g_settings.sharpness * 100.0f)),
+             int(std::lround(g_settings.sharpness * 100.0f)), int(std::lround(g_settings.blur * 100.0f)),
+             int(std::lround(g_settings.blur_limit * 100.0f)),
              g_toggle_key != 0 ? key_name(g_toggle_key).c_str() : "none", g_settings.debug ? ", Debug on" : "");
     acv_log(reshade::log::level::info, text);
 }
@@ -135,9 +129,12 @@ static void save_toggle_key()
     reshade::set_config_value(nullptr, SECTION, "ToggleKey", g_toggle_key);
 }
 
+// The indicator in the top left corner after DLSS is switched, so the toggle
+// key gives an answer with the overlay closed.
 static const auto INDICATOR_TIME = std::chrono::seconds(3);
 static std::chrono::steady_clock::time_point g_indicator_until;
 
+// Settings changes go to the log beside what they caused.
 static void log_change(const char *format, ...)
 {
     char text[160];
@@ -163,6 +160,7 @@ static bool toggle_key_pressed()
     return g_toggle_key != 0 && g_runtime != nullptr && g_runtime->is_key_pressed(g_toggle_key);
 }
 
+// A key ReShade itself answers to would do both things at once.
 static bool is_reshade_key(int vk)
 {
     for (const char *name : {"KeyOverlay", "KeyEffects", "KeyScreenshot", "KeyReload", "KeyNextPreset",
@@ -185,6 +183,8 @@ static std::string utf8(const wchar_t *text)
     return n > 0 ? std::string(out) : std::string();
 }
 
+// The name printed on the key, in the player's keyboard layout where it types
+// a character.
 static std::string key_name(uint32_t vk)
 {
     if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z'))
@@ -223,6 +223,7 @@ static std::string key_name(uint32_t vk)
     case VK_NUMLOCK: return "Num Lock";
     case VK_SCROLL: return "Scroll Lock";
     }
+    // Punctuation and anything rarer, as Windows names it for this layout.
     if (const UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC); scan != 0)
     {
         wchar_t text[48] = L"";
@@ -240,6 +241,7 @@ static void draw_toggle_key(effect_runtime *runtime)
     const std::string name = g_toggle_key != 0 ? key_name(g_toggle_key) : std::string("None");
     const std::string label = (g_listening ? std::string("Press a key, Esc to cancel") : name) + "###toggle_key";
     const int frame = ImGui::GetFrameCount();
+    // Closed or collapsed while listening: drop it rather than wait unseen.
     if (g_listening && frame != g_listen_frame + 1)
         g_listening = false;
     bool started = false;
@@ -249,10 +251,15 @@ static void draw_toggle_key(effect_runtime *runtime)
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Switches DLSS on and off while playing.\nBackspace while picking leaves it without a key.");
 
+    // Asked of ReShade rather than Windows, which reports every key as up while
+    // the overlay has the input. The frame listening starts on is skipped, so
+    // the Space or Enter that pressed the button is not taken as the answer.
     if (!g_listening || started || runtime == nullptr)
         return;
+    // From the middle mouse button up: the left one pressed the button.
     for (int vk = VK_MBUTTON; vk < 256; ++vk)
     {
+        // The generic modifier codes repeat their left and right forms.
         if (!runtime->is_key_pressed(vk) || vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU)
             continue;
         if (vk != VK_ESCAPE && is_reshade_key(vk))
@@ -268,8 +275,12 @@ static void draw_toggle_key(effect_runtime *runtime)
     }
 }
 
+//----------------------------------------------------------------------------
+// The window.
+
 static const ImVec4 WARNING_COLOR(0.96f, 0.73f, 0.24f, 1.0f);
 
+// "DLAA 1920x1200" at the render size, "1344x840 to 1920x1200" when upscaling.
 static std::string describe_mode(const taa_status &s)
 {
     char text[64];
@@ -280,6 +291,10 @@ static std::string describe_mode(const taa_status &s)
     return std::string(text) + (s.hdr ? ", HDR" : "");
 }
 
+// The bias the game has now, and the one a restart would bring if FSR was
+// switched or changed since it started. Without FSR there is no bias, so the
+// line only shows when one of the two isn't 0. The settings file is read at
+// most once a second.
 static void draw_lod_bias()
 {
     static float wanted = lod_bias();
@@ -329,12 +344,16 @@ static void draw_status(const taa_status &s)
     }
 }
 
+// The status takes up to two lines and the LOD bias one. Three are always kept
+// for them, so the controls below stay put when DLSS is switched.
 static const int STATUS_LINES = 3;
 
 static void draw_window(effect_runtime *runtime)
 {
+    // 16:9, wide enough for the longest status line at ReShade's default font
+    // and scaled with the font the user picked.
     const float scale = ImGui::GetFontSize() / 13.0f;
-    ImGui::SetWindowSize(ImVec2(560.0f * scale, 450.0f * scale), ImGuiCond_FirstUseEver);
+    ImGui::SetWindowSize(ImVec2(560.0f * scale, 370.0f * scale), ImGuiCond_FirstUseEver);
 
     const float top = ImGui::GetCursorPosY();
     const taa_status s = taa_get_status();
@@ -370,6 +389,7 @@ static void draw_window(effect_runtime *runtime)
         g_settings.sharpness = float(sharpness) / 100.0f;
         reshade::set_config_value(nullptr, SECTION, "Sharpness", sharpness);
     }
+    // Logged once the drag ends, and only if it ended somewhere new.
     static int dragged_from = 0;
     if (ImGui::IsItemActivated())
         dragged_from = sharpness;
@@ -378,50 +398,40 @@ static void draw_window(effect_runtime *runtime)
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("AMD's RCAS, run on the DLSS output before the HUD is drawn.");
 
-    // --- NEW UI BLOCK: CAMERA MOTION BLUR SLIDERS ---
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Text("Camera Motion Blur");
-    ImGui::Spacing();
-
-    float shutter = g_settings.shutter;
-    if (ImGui::SliderFloat("Shutter Speed", &shutter, 0.0f, 4.0f, "%.2f"))
+    int blur = int(std::lround(g_settings.blur * 100.0f));
+    if (ImGui::SliderInt("Motion blur", &blur, 0, 100, "%d%%"))
     {
-        g_settings.shutter = shutter;
-        reshade::set_config_value(nullptr, SECTION, "Shutter", shutter);
+        g_settings.blur = float(blur) / 100.0f;
+        reshade::set_config_value(nullptr, SECTION, "MotionBlur", blur);
+    }
+    static int blur_dragged_from = 0;
+    if (ImGui::IsItemActivated())
+        blur_dragged_from = blur;
+    if (ImGui::IsItemDeactivatedAfterEdit() && blur != blur_dragged_from)
+        log_change("motion blur set to %d%%", blur);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Blurs along the game's motion vectors, camera and objects, on the DLSS image before the HUD. "
+                          "100%% is a shutter open for a whole frame, 0 switches it off. "
+                          "Turn the game's own motion blur off.");
+
+    int blur_limit = int(std::lround(g_settings.blur_limit * 100.0f));
+    if (ImGui::SliderInt("Longest blur", &blur_limit, 1, 15, "%d%%"))
+    {
+        g_settings.blur_limit = float(blur_limit) / 100.0f;
+        reshade::set_config_value(nullptr, SECTION, "MotionBlurLimit", blur_limit);
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Fraction of a frame's motion that is blurred. 0.5 = standard 180-degree shutter.");
-
-    float max_length = g_settings.max_length;
-    if (ImGui::SliderFloat("Max Streak Length", &max_length, 0.0f, 0.50f, "%.3f"))
-    {
-        g_settings.max_length = max_length;
-        reshade::set_config_value(nullptr, SECTION, "MaxLength", max_length);
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Longest streak allowed, as a fraction of the screen height.");
-
-    int current_mode = (int)g_settings.mode;
-    if (ImGui::RadioButton("Camera Motion Only", current_mode == 0))
-    {
-        g_settings.mode = 0.0f;
-        reshade::set_config_value(nullptr, SECTION, "MBMode", 0);
-    }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("All Motion", current_mode == 1))
-    {
-        g_settings.mode = 1.0f;
-        reshade::set_config_value(nullptr, SECTION, "MBMode", 1);
-    }
-    // ------------------------------------------------
+        ImGui::SetTooltip("The longest streak, as a percentage of the screen height. Keeps fast turns from smearing.");
 }
 
+// ReShade raises this every frame, overlay open or not, inside its ImGui frame.
 static void on_overlay(effect_runtime *)
 {
     if (std::chrono::steady_clock::now() >= g_indicator_until)
         return;
 
+    // Green only while DLSS is running. Otherwise amber, with the reason, and
+    // the window has the details.
     const taa_status s = taa_get_status();
     std::string text;
     ImVec4 color = WARNING_COLOR;
@@ -460,6 +470,8 @@ static void on_overlay(effect_runtime *)
     ImGui::PopStyleVar();
 }
 
+//----------------------------------------------------------------------------
+
 static void on_init_effect_runtime(effect_runtime *runtime)
 {
     g_runtime = runtime;
@@ -486,4 +498,42 @@ static void on_present(effect_runtime *runtime)
     {
         logged_width = width;
         logged_height = height;
-        char text
+        char text[64];
+        snprintf(text, sizeof(text), "screen is %ux%u", width, height);
+        acv_log(reshade::log::level::info, text);
+    }
+
+    // With the overlay open the key could be typed into a text box instead.
+    if (runtime == g_runtime && !g_overlay_open && toggle_key_pressed())
+        set_enabled(!g_settings.enabled, "the toggle key");
+    taa_present(runtime->get_command_queue(), width, height);
+}
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
+{
+    switch (reason)
+    {
+    case DLL_PROCESS_ATTACH:
+        // Must come before any other ReShade call: reshade.hpp latches the
+        // module handle on first use, and only register_addon passes it.
+        if (!reshade::register_addon(module))
+            return FALSE;
+        load_settings();
+        log_start();
+        log_settings();
+        lod_register();
+        taa_register();
+        reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
+        reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
+        reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_open_overlay);
+        reshade::register_event<reshade::addon_event::reshade_present>(on_present);
+        reshade::register_event<reshade::addon_event::reshade_overlay>(on_overlay);
+        reshade::register_overlay("ACV DLSS", draw_window);
+        break;
+    case DLL_PROCESS_DETACH:
+        taa_unregister();
+        reshade::unregister_addon(module);
+        break;
+    }
+    return TRUE;
+}

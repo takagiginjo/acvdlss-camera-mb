@@ -41,12 +41,16 @@ public:
     void prepare(ID3D12GraphicsCommandList *list, const game_texture &color, const game_texture &motion,
                  const game_texture &depth, const prepare_constants &constants);
 
-    // Sharpens if asked and hands the result over. At DLAA it is copied into
+    // Sharpens if asked, then blurs along the motion vectors if asked, and
+    // hands the result over. At DLAA it is copied into
     // the game's TAA target. When upscaling, it goes into presented() for the
     // pass that scales the frame to the screen, and a render-size copy into
     // the TAA target for everything else that reads it. Every work texture is
     // then back in the state prepare() expects.
-    void finish(ID3D12GraphicsCommandList *list, float sharpness, bool hdr, ID3D12Resource *taa_target);
+    // blur is the shutter, 0 skips the pass; blur_limit the longest blur as a
+    // fraction of the screen height.
+    void finish(ID3D12GraphicsCommandList *list, float sharpness, bool hdr, ID3D12Resource *taa_target, float blur,
+                float blur_limit, uint64_t frame);
     // For when DLSS did not run after prepare(): only the states go back.
     void abandon(ID3D12GraphicsCommandList *list);
 
@@ -72,6 +76,10 @@ private:
     void release_textures(uint64_t frame);
     D3D12_GPU_DESCRIPTOR_HANDLE next_slot(D3D12_CPU_DESCRIPTOR_HANDLE &cpu);
     D3D12_CPU_DESCRIPTOR_HANDLE offset(D3D12_CPU_DESCRIPTOR_HANDLE base, uint32_t index) const;
+    // Motion blur of `source` (output size, readable) into _blurred, using the
+    // motion vectors in _motion.
+    void blur(ID3D12GraphicsCommandList *list, ID3D12Resource *source, float strength, float max_length,
+              uint64_t frame);
     void write_srv(D3D12_CPU_DESCRIPTOR_HANDLE at, ID3D12Resource *resource, DXGI_FORMAT format);
     void write_uav(D3D12_CPU_DESCRIPTOR_HANDLE at, ID3D12Resource *resource, DXGI_FORMAT format);
     void dispatch(ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline, const void *constants,
@@ -83,6 +91,7 @@ private:
     ID3D12PipelineState *_prepare = nullptr;
     ID3D12PipelineState *_rcas = nullptr;
     ID3D12PipelineState *_downsample = nullptr;
+    ID3D12PipelineState *_motionblur = nullptr;
     ID3D12DescriptorHeap *_heap = nullptr;
     uint32_t _increment = 0;
     uint32_t _next_slot = 0;
@@ -90,7 +99,7 @@ private:
     // Render size: what the game hands over.
     ID3D12Resource *_color = nullptr, *_motion = nullptr, *_depth = nullptr, *_downsampled = nullptr;
     // Output size: what DLSS makes.
-    ID3D12Resource *_output = nullptr, *_sharpened = nullptr, *_presented = nullptr;
+    ID3D12Resource *_output = nullptr, *_sharpened = nullptr, *_blurred = nullptr, *_presented = nullptr;
     uint32_t _width = 0, _height = 0, _output_width = 0, _output_height = 0;
     DXGI_FORMAT _color_format = DXGI_FORMAT_UNKNOWN;
 

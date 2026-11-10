@@ -1,14 +1,15 @@
 #include "passes.h"
 
 #include <downsample.h>
+#include <motionblur.h>
 #include <prepare.h>
 #include <rcas.h>
 
 #include <cstdio>
 #include <iterator>
 
-// Six descriptors per dispatch: three inputs, three outputs. At most three
-// dispatches a frame, so a slot comes round again after 21 frames, far more
+// Six descriptors per dispatch: three inputs, three outputs. At most four
+// dispatches a frame, so a slot comes round again after 16 frames, far more
 // than the GPU ever trails behind.
 static const uint32_t SLOT_SIZE = 6;
 static const uint32_t SLOT_COUNT = 64;
@@ -96,6 +97,7 @@ bool passes::init(ID3D12Device *device)
         {prepare_cs, sizeof(prepare_cs), &_prepare, "the prepare pass"},
         {rcas_cs, sizeof(rcas_cs), &_rcas, "the sharpening pass"},
         {downsample_cs, sizeof(downsample_cs), &_downsample, "the downsample pass"},
+        {motionblur_cs, sizeof(motionblur_cs), &_motionblur, "the motion blur pass"},
     };
     for (const auto &shader : shaders)
     {
@@ -129,6 +131,7 @@ void passes::shutdown()
         r.resource->Release();
     _retired.clear();
     release(_heap);
+    release(_motionblur);
     release(_downsample);
     release(_rcas);
     release(_prepare);
@@ -156,7 +159,7 @@ ID3D12Resource *passes::make_texture(DXGI_FORMAT format, uint32_t width, uint32_
 
 void passes::release_textures(uint64_t frame)
 {
-    for (ID3D12Resource **t : {&_color, &_motion, &_depth, &_downsampled, &_output, &_sharpened, &_presented})
+    for (ID3D12Resource **t : {&_color, &_motion, &_depth, &_downsampled, &_output, &_sharpened, &_blurred, &_presented})
     {
         if (*t != nullptr)
             _retired.push_back({*t, frame});
@@ -184,7 +187,8 @@ bool passes::resize(uint32_t width, uint32_t height, uint32_t output_width, uint
     _depth = make_texture(DXGI_FORMAT_R32_FLOAT, width, height, uav);
     _output = make_texture(color_format, output_width, output_height, uav);
     _sharpened = make_texture(color_format, output_width, output_height, uav);
-    bool ok = _color && _motion && _depth && _output && _sharpened;
+    _blurred = make_texture(color_format, output_width, output_height, uav);
+    bool ok = _color && _motion && _depth && _output && _sharpened && _blurred;
     if (upscaling())
     {
         _downsampled = make_texture(color_format, width, height, uav);
@@ -280,6 +284,27 @@ void passes::dispatch(ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipe
     list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
 }
 
+void passes::blur(ID3D12GraphicsCommandList *list, ID3D12Resource *source, float strength, float max_length,
+                  uint64_t frame)
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu;
+    const D3D12_GPU_DESCRIPTOR_HANDLE table = next_slot(cpu);
+    write_srv(offset(cpu, 0), source, _color_format);
+    write_srv(offset(cpu, 1), _motion, DXGI_FORMAT_R16G16_FLOAT);
+    write_srv(offset(cpu, 2), nullptr, _color_format);
+    write_uav(offset(cpu, 3), _blurred, _color_format);
+    write_uav(offset(cpu, 4), nullptr, _color_format);
+    write_uav(offset(cpu, 5), nullptr, _color_format);
+
+    const float constants[4] = {strength, max_length, 16.0f, float(frame % 64)};
+    list->SetDescriptorHeaps(1, &_heap);
+    list->SetComputeRootSignature(_root);
+    list->SetPipelineState(_motionblur);
+    list->SetComputeRoot32BitConstants(0, 4, constants, 0);
+    list->SetComputeRootDescriptorTable(1, table);
+    list->Dispatch((_output_width + 7) / 8, (_output_height + 7) / 8, 1);
+}
+
 void passes::prepare(ID3D12GraphicsCommandList *list, const game_texture &color, const game_texture &motion,
                      const game_texture &depth, const prepare_constants &constants)
 {
@@ -307,7 +332,8 @@ void passes::prepare(ID3D12GraphicsCommandList *list, const game_texture &color,
     list->ResourceBarrier(UINT(std::size(barriers)), barriers);
 }
 
-void passes::finish(ID3D12GraphicsCommandList *list, float sharpness, bool hdr, ID3D12Resource *taa_target)
+void passes::finish(ID3D12GraphicsCommandList *list, float sharpness, bool hdr, ID3D12Resource *taa_target, float blur_strength,
+                    float blur_limit, uint64_t frame)
 {
     ID3D12Resource *result = _output;
     if (sharpness > 0.0f)
@@ -321,6 +347,20 @@ void passes::finish(ID3D12GraphicsCommandList *list, float sharpness, bool hdr, 
             transition(_output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &back);
         result = _sharpened;
+    }
+
+    // Motion blur goes after the sharpening, so RCAS doesn't sharpen the
+    // streaks. _motion is still readable from prepare().
+    if (blur_strength > 0.0f)
+    {
+        const D3D12_RESOURCE_BARRIER readable =
+            transition(result, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(1, &readable);
+        blur(list, result, blur_strength, blur_limit, frame);
+        const D3D12_RESOURCE_BARRIER back =
+            transition(result, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &back);
+        result = _blurred;
     }
 
     const D3D12_RESOURCE_BARRIER to_read = transition(result, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, READABLE);

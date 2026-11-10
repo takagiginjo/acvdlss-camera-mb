@@ -1510,7 +1510,8 @@ bool replace(command_list *cmd, list_state &st)
         g_timer.mark(list, c.frame, 2);
     // The slider scales RCAS's lobe directly. AMD's stops would jump from
     // nothing to a quarter strength at the first step.
-    c.work.finish(list, g_settings.sharpness, hdr, reinterpret_cast<ID3D12Resource *>(target.handle));
+    c.work.finish(list, g_settings.sharpness, hdr, reinterpret_cast<ID3D12Resource *>(target.handle),
+                  g_settings.blur, g_settings.blur_limit, c.frame);
     if (timed)
     {
         g_timer.mark(list, c.frame, 3);
